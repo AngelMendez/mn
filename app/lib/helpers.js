@@ -1,19 +1,27 @@
-// Helpers for various tasks
+/**
+ * Helpers for various tasks
+ */
 
 // Dependencies
 const crypto = require('crypto');
-const config = require('./config');
 const https = require('https');
 const querystring = require('querystring');
 const path = require('path');
-const fs = require('fs');
+const fsAsync = require('../asyncs/fs.async');
+const httpsAsync = require('../asyncs/https.async');
 
+const config = require('./config');
 
 // Container for all the helpers
 let helpers = {};
 
-// Create a SHA256 hash
-helpers.hash = (str) => {
+/**
+ * Hash a value using sha256 cryptographic method.
+ *
+ * @param {String} str
+ *  Value to hash.
+ */
+helpers.hash = str => {
     if (typeof(str) == 'string' && str.length > 0) {
         const hash = crypto.createHmac('sha256', config.hashingSecret).update(str).digest('hex');
         return hash;
@@ -22,7 +30,11 @@ helpers.hash = (str) => {
     }
 };
 
-// Parse a JSON string to an object in all cases, without throwing
+/**
+ * Parse a JSON string to an object in all cases, without throwing
+ * @param {string} str
+ * Json string
+ */
 helpers.parseJsonToObject = str => {
     try {
         const obj = JSON.parse(str);
@@ -32,37 +44,39 @@ helpers.parseJsonToObject = str => {
     }
 }
 
-// Create a string of random alphanumeric characters, of a given length
+/**
+ * Create a string of random alphanumeric characters, of a given length
+ * @param {string} strLength 
+ * The length required for the string
+ */
 helpers.createRandomString = strLength => {
     strLength = typeof(strLength) == 'number' && strLength > 0 ? strLength : false;
     if (strLength) {
         // Define all the possible characters that could go into a string
         const possibleCharacters = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
-        // Start the final string
         let str = '';
-
-        for (let i = 1; i <= strLength; i++) {
-            // Get a random character from the possibleCharacters string
-            const randomCharacter = possibleCharacters.charAt(Math.floor(Math.random() * possibleCharacters.length));
-
-            // Append this character to the final string
-            str += randomCharacter;
+        while(str.length < strLength) {
+            str = str.concat(possibleCharacters.charAt(Math.floor(Math.random() * possibleCharacters.length)));
         }
-
-        // Return the final string
         return str;
     } else {
         return false;
     }
 };
 
-// Send an SMS message via Twilio
-helpers.sendTwilioSMS = (phone, message, callback) => {
+/**
+ * Send an SMS message via config.twilio
+ * @param {string} phone
+ * Phone to with the message will be sent, has to be 10 chars long
+ * @param {string} message
+ * Message to be sent in the SMS
+ */
+helpers.sendTwilioSMS = async (phone, message) => {
     // Validate parameters
     phone = typeof(phone) == 'string' && phone.trim().length == 10 ? phone.trim() : false;
     message = typeof(message) == 'string' && message.trim().length > 0 && message.trim().length <= 1600 ? message.trim() : false;
-
+    
     if (phone && message) {
         // Config the request payload
         const payload = {
@@ -70,10 +84,10 @@ helpers.sendTwilioSMS = (phone, message, callback) => {
             'To': '+52' + phone,
             'Body': message,
         };
-
+        
         // Stringify the payload
         const stringPayload = querystring.stringify(payload);
-
+        
         // Configure the request details
         const requestDetails = {
             'protocol': 'https:',
@@ -86,80 +100,107 @@ helpers.sendTwilioSMS = (phone, message, callback) => {
                 'Content-Length': Buffer.byteLength(stringPayload),
             },
         };
-
+        
         // Instantiate the request object
-        const req = https.request(requestDetails, res => {
-            // Grab the status of the sent request
-            const status = res.statusCode;
-
-            // Callback successfully if the request went through
-            if (status == 200 || status == 201) {
-                callback(false);
-            } else {
-                callback('Status code returned was ' + status);
-            }
+        const req = await httpsAsync.request(requestDetails)
+            .then(res => {
+                // Grab the status of the sent request
+                const { statusCode } = res;
+                
+                // Callback successfully if the request went through
+                if (statusCode == 200 || statusCode == 201) {
+                    return {
+                        statusCode,
+                    }
+                } else {
+                    return {
+                        statusCode,
+                        error: 'Status code returned was ' + statusCode,
+                    }
+                }
         });
-
+        
         // bind to the error event so it does not get thrown
         req.on('error', err => {
-            callback(err);
+            return {
+                statusCode: 500,
+                error: err,
+            }
         });
-
+        
         // Add the payload
         req.write(stringPayload);
-
+        
         // End the request
         req.end();
-
+        
     } else {
-        callback('Given parameters were missing or invalid.');
+        return {
+            statusCode: 400,
+            error: 'Given parameters were missing or invalid.',
+        }
     }
 };
 
-// Get the string content of a template
-helpers.getTemplate = (templateName, data) => 
-    new Promise((resolve, reject) => {
-        templateName = typeof(templateName) == 'string' && templateName.length > 0 ? templateName : false;
-        data = typeof(data) == 'object' && data !== null ? data : {};
 
-        if (templateName) {
-            const templatesDir = path.join(__dirname, '/../templates/');
-            fs.readFile(`${templatesDir}${templateName}.html`, 'utf8', (err, str) => {
-                if (!err && str && str.length > 0) {
-                    // Do interpolation on the string
-                    const finalString = helpers.interpolate(str, data);
-                    resolve(finalString);
-                } else {
-                    reject('No template could be found');
-                }
-            });
+/**
+ * Get the string content of a template
+ * @param { string } templateName The name of the template
+ * @param { object } data The values to be interpolated in the template
+ */
+helpers.getTemplate = async (templateName, data) => {
+    templateName = typeof(templateName) == 'string' && templateName.length > 0 ? templateName : false;
+    data = typeof(data) == 'object' && data !== null ? data : {};
+
+    if (templateName) {
+        const templatesDir = path.join(__dirname, '/../templates/');
+        const str =  await fsAsync.readFile(`${templatesDir}${templateName}.html`, 'utf8');
+        if (str && str.length > 0) {
+            // Do interpolation on the string
+            const finalString = helpers.interpolate(str, data);
+            return {
+                payload: finalString,
+            }
         } else {
-            reject('A valid template name was not specified');
+            return {
+                error: 'No template could be found.',
+            }
         }
-    });
+    } else {
+        return {
+            error: 'A valid template name was not specified.',
+        }
+    }
+};
 
-// Add the universal header and footer to a string, and pass provided data object to header and footer to interpolation
-helpers.addUniversalTemplates = (str, data) => 
-    new Promise((resolve, reject) => {
-        str = typeof(str) == 'string' && str.length > 0 ? str : '';
-        data = typeof(data) == 'object' && data !== null ? data : {};
+/**
+ * Add the universal header and footer to a string, and pass provided data object to header and footer to interpolation
+ * @param { string } str The HTML string to be added between the header and the footer.
+ * @param { object } data Data to be interpolated in the template.
+ */
+helpers.addUniversalTemplates = async (str, data) => {
+    str = typeof(str) == 'string' && str.length > 0 ? str : '';
+    data = typeof(data) == 'object' && data !== null ? data : {};
 
-        // Get the header
-        helpers.getTemplate('_header', data)
-            .then(headerString => {
-                // Get the footer
-                helpers.getTemplate('_footer', data)
-                    .then(footerString => {
-                        // Add them all together
-                        const fullString = headerString + str + footerString;
-                        resolve(fullString);
-                    })
-                    .catch(err => reject('Coud not find the footer template'));
-            })
-            .catch(err => reject('Could not find the header template.'));
-    });
+    // Get the header
+    const { payload: headerString } = await helpers.getTemplate('_header', data);
+    const { payload: footerString } = await helpers.getTemplate('_footer', data);
+    if (!headerString || !footerString) {
+        return {
+            error: 'Could not find one or more templates.',
+        }
+    }
+    const fullString = headerString + str + footerString;
+    return {
+        payload: fullString,
+    }           
+};
 
-// Take a given string and a data object and find/replace all the keys within it
+/**
+ * Take a given string and a data object and find/replace all the keys within it
+ * @param { string } str The value to search
+ * @param { object } data 
+ */
 helpers.interpolate = (str, data) => {
     str = typeof(str) == 'string' && str.length > 0 ? str : '';
     data = typeof(data) == 'object' && data !== null ? data : {};
@@ -179,27 +220,33 @@ helpers.interpolate = (str, data) => {
             str = str.replace(find, replace);
         }
     }
-
     return str;
 };
 
-// Get the content of a static (public) asset
-helpers.getStaticAsset = fileName => 
-    new Promise((resolve, reject) => {
-        fileName = typeof(fileName) == 'stirng' && fileName.length > 0 ? fileName: false;
-        if (fileName) {
-            const publicDir = path.join(__dirname, '/../public/');
-            fs.readFile(publicDir+fileName, (err, data) => {
-                if (!err && data) {
-                    resolve(data);
-                } else {
-                    reject('No file could be found');        
-                }
-            })
+/**
+ * Get the content of a static (public) asset
+ * @param { string } fileName The name of the file to get
+ */
+helpers.getStaticAsset = async fileName => {
+    fileName = typeof(fileName) == 'string' && fileName.length > 0 ? fileName: false;
+    if (fileName) {
+        const publicDir = path.join(__dirname, '/../public/');
+        const data = await fsAsync.readFile(publicDir+fileName);
+        if (data) {
+            return {
+                payload: data,
+            }
         } else {
-            reject('A valid file name was not specified');
+            return {
+                error: 'No file could be found.',
+            }
         }
-    });
+    } else {
+        return {
+            error: 'A valid file name was not specified.',
+        }
+    }
+};
 
 // Export the module
 module.exports = helpers;

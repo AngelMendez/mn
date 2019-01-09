@@ -4,8 +4,8 @@
 const path = require('path');
 const fs = require('fs');
 const _data = require('./data');
-const http = require('http');
-const https = require('https');
+const httpAsync = require('../asyncs/http.async');
+const httpsAsync = require('../asyncs/https.async');
 const helpers = require('./helpers');
 const url = require('url');
 const _logs = require('./logs');
@@ -15,29 +15,22 @@ const debug = util.debuglog('workers');
 let workers = {};
 
 // Lookup all checks, get their data, send to a validator
-workers.gatherAllChecks = () => {
-
+workers.gatherAllChecks = async () => {
     // Get all the checks
-    _data.listPromise('checks')
-        .then(checks => {
-            if (checks.length > 0) {
-                checks.forEach(check => {
-                    _data.readPromise('checks', check)
-                        .then(originalCheckData => {
-                            // Pass it to the check validator, and let that function continue or log errors as needed
-                            workers.validateCheckData(originalCheckData);
-                        })
-                        .catch(err => debug(err));
-                });
-            } else {
-                debug("Error: Could not find any checks to process");
-            }
+    const checks = await _data.list('checks');
+    if (checks.length > 0) {
+        checks.map(async check => {
+            const originalCheckData = await _data.read('checks', check);
+            // Pass it to the check validator, and let that function continue or log errors as needed
+            await workers.validateCheckData(originalCheckData);
         })
-        .catch(err => debug(err));
+    } else {
+        debug("Error: Could not find any checks to process");
+    }
 };
 
 // Sanity-check the check-data
-workers.validateCheckData = (originalCheckData) => {
+workers.validateCheckData = async originalCheckData => {
     originalCheckData = typeof(originalCheckData) == 'object' && originalCheckData !== null ? originalCheckData : {};
     originalCheckData.id = typeof(originalCheckData.id) == 'string' && originalCheckData.id.trim().length == 20 ? originalCheckData.id.trim() : false;
     originalCheckData.userPhone = typeof(originalCheckData.userPhone) == 'string' && originalCheckData.userPhone.trim().length == 10 ? originalCheckData.userPhone.trim() : false;
@@ -61,14 +54,14 @@ workers.validateCheckData = (originalCheckData) => {
         originalCheckData.successCodes &&
         originalCheckData.timeoutSeconds
     ) {
-        workers.performCheck(originalCheckData);
+        await workers.performCheck(originalCheckData);
     } else {
         debug("Error: One of the checks is not properly formatted. Skipping it.");
     }
 };
 
 // Perform the check, send the originalCheckData and the outcome of the check process, to the next step in the processe
-workers.performCheck = (originalCheckData) => {
+workers.performCheck = async originalCheckData => {
     // Prepare the initial check outcome
     let checkOutcome = {
         'error': false,
@@ -92,41 +85,42 @@ workers.performCheck = (originalCheckData) => {
     };
 
     // Instantiate the request object (using either the http or https module)
-    const _moduleToUse = originalCheckData.protocol == 'http' ? http : https;
-    const req = _moduleToUse.request(requestDetails, res => {
-        // Grab the status of the sent request
-        const status = res.statusCode;
+    const _moduleToUse = originalCheckData.protocol == 'http' ? httpAsync : httpsAsync;
+    const req = await _moduleToUse.request(requestDetails)
+        .then(async res => {
+            // Grab the status of the sent request
+            const status = res.statusCode;
 
-        // Update the checkoutcome and pass the data along
-        checkOutcome.responseCode = status;
-        if (!outcomeSent) {
-            workers.processCheckOutcome(originalCheckData, checkOutcome);
-            outcomeSent = true;
-        }
+            // Update the checkoutcome and pass the data along
+            checkOutcome.responseCode = status;
+            if (!outcomeSent) {
+                await workers.processCheckOutcome(originalCheckData, checkOutcome);
+                outcomeSent = true;
+            }
     });
 
     // Bind to the error event so it does not get thrown
-    req.on('error', (error) => {
+    req.on('error', async (error) => {
         // Update the checkOutcome and pass the data along
         checkOutcome.error = {
             'error': true,
             'value': error,
         };
         if (!outcomeSent) {
-            workers.processCheckOutcome(originalCheckData, checkOutcome);
+            await workers.processCheckOutcome(originalCheckData, checkOutcome);
             outcomeSent = true;
         }
     });
 
     // Bind to the timeout event
-    req.on('timeout', (error) => {
+    req.on('timeout', async (error) => {
         // Update the checkOutcome and pass the data along
         checkOutcome.error = {
             'error': true,
             'value': 'timeout',
         };
         if (!outcomeSent) {
-            workers.processCheckOutcome(originalCheckData, checkOutcome);
+            await workers.processCheckOutcome(originalCheckData, checkOutcome);
             outcomeSent = true;
         }
     });
@@ -137,7 +131,7 @@ workers.performCheck = (originalCheckData) => {
 
 // Process the check outcome, update the check data as needed, trigger an alert if needed
 // Special logic for accomodation a check that has never been tested before (don't alert on that one)
-workers.processCheckOutcome = (originalCheckData, checkOutcome) => {
+workers.processCheckOutcome = async (originalCheckData, checkOutcome) => {
     // Decide if the check is considered up or down
     const state = !checkOutcome.error && checkOutcome.responseCode && originalCheckData.successCodes.indexOf(checkOutcome.responseCode) > -1 ? 'up' : 'down';
 
@@ -146,7 +140,7 @@ workers.processCheckOutcome = (originalCheckData, checkOutcome) => {
 
     // Log the outcome
     const timeOfCheck = Date.now();
-    workers.log(originalCheckData, checkOutcome, state, alertWanted, timeOfCheck);
+    await workers.log(originalCheckData, checkOutcome, state, alertWanted, timeOfCheck);
 
     // Update the check data
     const newCheckData = originalCheckData;
@@ -154,34 +148,31 @@ workers.processCheckOutcome = (originalCheckData, checkOutcome) => {
     newCheckData.lastChecked = timeOfCheck;
 
     // Save the updates
-    _data.update('checks', newCheckData.id, newCheckData, err => {
-        if (!err) {
-            // Send the new check data to the next phase in the process if needed
-            if (alertWanted) {
-                workers.alertUserToStatusChange(newCheckData);
-            } else {
-                debug('Check outcome has not changed, no alert needed.');
-            }
+    const { statusCode, payload, error } = await _data.update('checks', newCheckData.id, newCheckData);
+    if (!error) {
+        // Send the new check data to the next phase in the process if needed
+        if (alertWanted) {
+            await workers.alertUserToStatusChange(newCheckData);
         } else {
-            debug("Error trying to save updated to one of the checks.");
+            debug('Check outcome has not changed, no alert needed.');
         }
-    });
+    } else {
+        debug("Error trying to save updated to one of the checks.");
+    }
 };
 
 // Alert the user as to ac hange in their check status
-workers.alertUserToStatusChange = newCheckData => {
+workers.alertUserToStatusChange = async newCheckData => {
     const message = `Alert, Your check for ${newCheckData.method.toUpperCase()} ${newCheckData.protocol}://${newCheckData.url} is currently ${newCheckData.state}`;
-    helpers.sendTwilioSMS(newCheckData.userPhone, message, err => {
-        if (!err) {
-            debug('Success: User was alerted to a status change in their check, via SMS.', message);
-        } else {
-            debug('Error: Could not send sms alert to user who had a state change in their check.');
-        }
-    });
+    const { statusCode, error} = await helpers.sendTwilioSMS(newCheckData.userPhone, message);
+    if (!error) {
+        debug('Success: User was alerted to a status change in their check, via SMS.', message);
+    } else {
+        debug('Error: Could not send sms alert to user who had a state change in their check. ' + statusCode);
+    }
 };
 
-// 
-workers.log = (originalCheckData, checkOutcome, state, alertWanted, timeOfCheck) => {
+workers.log = async (originalCheckData, checkOutcome, state, alertWanted, timeOfCheck) => {
     // Form the log data
     const logData = {
         'check': originalCheckData,
@@ -198,13 +189,12 @@ workers.log = (originalCheckData, checkOutcome, state, alertWanted, timeOfCheck)
     const logFileName = originalCheckData.id;
 
     // Append the log string to the file
-    _logs.append(logFileName, logString, err => {
-        if (!err) {
-            debug('Logging to file succeeded');
-        } else {
-            debug('Logging to file failed');
-        }
-    });
+    const { error } = await _logs.append(logFileName, logString);
+    if (!error) {
+        debug('Logging to file succeeded');
+    } else {
+        debug('Logging to file failed');
+    }
 };
 
 // Timer to execute the worker-process once per minute
@@ -215,39 +205,36 @@ workers.loop = () => {
 };
 
 // Rotate (compress) the log files
-workers.rotateLogs = () => {
+workers.rotateLogs = async () => {
     // List all the (non compressed) log files
-    _logs.list(false, (err, logs) => {
-        if (!err && logs && logs.length > 0) {
-            logs.forEach(logName => {
-                // Compress the data to a different file
-                const logId = logName.replace('.log', '');
-                const newFileId = `${logId}-${Date.now()}`;
-                _logs.compress(logId, newFileId, err => {
-                    if (!err) {
-                        // Truncate the log
-                        _logs.truncate(logId, err => {
-                            if (!err) {
-                                debug("Success truncating logFile");
-                            } else {
-                                debug("Error truncating logFile");
-                            }
-                        });
-                    } else {
-                        debug("Error: Compressing one of the log files", err);            
-                    }
-                });
+    let { payload: logs, error } = await _logs.list(false);
+    if (!error && logs && logs.length > 0) {
+        logs.map(async logName => {
+            // Compress the data to a different file
+            const logId = logName.replace('.log', '');
+            const newFileId = `${logId}-${Date.now()}`;
+            let { error } = await _logs.compress(logId, newFileId);
+            if (!error) {
+                // Truncate the log
+                let { error } = await _logs.truncate(logId);
+                if (!error) {
+                    debug("Success truncating logFile");
+                } else {
+                    debug("Error truncating logFile");
+                }
+            } else {
+                debug("Error: Compressing one of the log files", error);            
+            }
             });
-        } else {
-            debug("Error: Could not find any logs to rotate");
-        }
-    });
+    } else {
+        debug("Error: Could not find any logs to rotate");
+    }
 };
 
 // Timer to execute the log-rotation once per day
-workers.logRotationLoop = () => {
-    setInterval(() => {
-        workers.rotateLogs();
+workers.logRotationLoop = async () => {
+    setInterval(async () => {
+        await workers.rotateLogs();
     }, 1000 * 60 * 60 * 24);
 };
 

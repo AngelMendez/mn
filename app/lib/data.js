@@ -1,144 +1,153 @@
 // Library for storing and editing data
 
-const fs = require('fs');
+let fs = require('fs');
 const path = require('path');
 const helpers = require('./helpers');
+const util = require('util');
+const fsAsync = require('../asyncs/fs.async');
 
 // Container for the module (to be exported)
-let lib = {};
+let _data = {};
 
 // Base directory of the data folder
-lib.baseDir = path.join(__dirname, '/../.data/');
+_data.baseDir = path.join(__dirname, '/../.data/');
 
-lib.create = (dir, file, data, callback) => {
+_data.create = async (dir, file, data) => {
     // Open the file for writing
-    fs.open(lib.baseDir + `${dir}/${file}.json`, 'wx', (err, fileDescriptor) => {
-        if (!err && fileDescriptor) {
+    try {
+        const fileDescriptor = await fsAsync.open(_data.baseDir + `${dir}/${file}.json`, 'wx');
+        console.log(fileDescriptor);
+        if (fileDescriptor) {
             // Convert data to string
             const stringData = JSON.stringify(data);
-
+            
             // Write to file and close it
-            fs.writeFile(fileDescriptor, stringData, err => {
-                if (!err) {
-                    fs.close(fileDescriptor, err => {
-                        if (!err) {
-                            callback(false);
-                        } else {
-                            callback('Error closing new file' + err);
-                        }
-                    })
+            const writeFileError = await fsAsync.writeFile(fileDescriptor, stringData);
+            if (!writeFileError) {
+                const errClose = await fsAsync.close(fileDescriptor)
+                if (!errClose) {
+                    return {
+                        statusCode: 200,
+                        payload: data,
+                    };
                 } else {
-                    callback('Error writing to new file.' + err);
+                    return {
+                        statusCode: 500,
+                        error: 'Error closing new file' + errClose,
+                    };
                 }
-            });
-        } else {
-            callback('Could not create new file, it may already exist.' + err);
-        }
-    });
-};
-
-// Read data from a file
-lib.readPromise = (dir, file) => 
-    new Promise((resolve, reject) => {
-        fs.readFile(lib.baseDir+dir+'/'+file+'.json', 'utf-8', (err, data) => {
-            if (!err && data) {
-                const parsedData = helpers.parseJsonToObject(data);
-                resolve(parsedData);
             } else {
-                reject(err);
+                return {
+                    statusCode: 500,
+                    error: 'Error writing to new file.' + writeFileError,
+                };
             }
-        });
-    });
-
-// Read data from a file
-lib.read = (dir, file, callback) => {
-    fs.readFile(lib.baseDir+dir+'/'+file+'.json', 'utf-8', (err, data) => {
-        if (!err && data) {
-            const parsedData = helpers.parseJsonToObject(data);
-            callback(false, parsedData);
         } else {
-            callback(err, data);
+            return {
+                statusCode: 500,
+                error: 'Could not create new file, it may already exist.'
+            };
         }
-    });
+    } catch (error) {
+        return {
+            statusCode: 500,
+            error: 'An error ocurred.',
+        };
+    }
+};
+/**
+ * Read data from a file
+ * @param {string} dir The directory in which the file will be searched
+ * @param {string} file The identifier to locate the file
+ */
+_data.read = async (dir, file) => {
+    try {
+        const data = await fsAsync.readFile(_data.baseDir+dir+'/'+file+'.json', 'utf-8');
+        const parsedData = helpers.parseJsonToObject(data);
+        return parsedData;
+    } catch (error) {
+        return null;
+    }
 };
 
-lib.update = (dir, file, data, callback) => {
+_data.update = async (dir, file, data) => {
     // Open the file for writing
-    fs.open(lib.baseDir+dir+'/'+file+'.json', 'r+', (err, fileDescriptor) => {
-        if (!err && fileDescriptor) {
-            // Convert data to string
-            const stringData = JSON.stringify(data);
-
-            // Truncate the file
-            fs.ftruncate(fileDescriptor, err => {
-                if (!err) {
-                    // Write to the file and close it
-                    fs.writeFile(fileDescriptor, stringData, err => {
-                        if (!err) {
-                            fs.close(fileDescriptor, error => {
-                                if (!err) {
-                                    callback(false);
-                                } else {
-                                    callback('Error closing the file.');
-                                }
-                            });
-                        } else {
-                            callback('Error writing to existing file.');
-                        }
-                    });
+    let  fileDescriptor = await fsAsync.open(_data.baseDir+dir+'/'+file+'.json', 'r+');
+    if (fileDescriptor) {
+        // Convert data to string
+        const stringData = JSON.stringify(data);
+        
+        // Truncate the file
+        const truncateError = await fsAsync.ftruncate(fileDescriptor);
+        if (!truncateError) {
+            // Write to the file and close it
+            const writeFileError = await fsAsync.writeFile(fileDescriptor, stringData);
+            if (!writeFileError) {
+                const closeError = await fsAsync.close(fileDescriptor);
+                if (!closeError) {
+                    return {
+                        statusCode: 200,
+                        payload: data,
+                    }
                 } else {
-                    callback('Error truncating file.');
+                    return {
+                        statusCode: 500,
+                        error: 'Error closing the file.',
+                    };
                 }
-            });
-        } else {
-            callback('Could not open the file for updating, it may not exist yet.' + err);
-        }
-    });
-};
-
-// Delete a file
-lib.delete = (dir, file, callback) => {
-    // Unlink the file
-    fs.unlink(lib.baseDir+dir+'/'+file+'.json', err => {
-        if (!err) {
-            callback(false);
-        } else {
-            callback('Error deleting file: ' + err);
-        }
-    });
-};
-
-// List all the items in a directory | Promise
-lib.listPromise = dir => 
-    new Promise((resolve, reject) => {
-        fs.readdir(lib.baseDir + dir + '/', (err, data) => {
-            if (!err && data && data.length > 0) {
-                let trimmedFileNames = [];
-                data.forEach((fileName) => {
-                    trimmedFileNames.push(fileName.replace('.json', ''));
-                });
-                resolve(trimmedFileNames);
             } else {
-                reject(err);
+                return {
+                    statusCode: 500,
+                    error: 'Error writing to existing file.',
+                };
             }
-        });
-    });
+        } else {
+            return {
+                statusCode: 500,
+                error: 'Error truncating file.',
+            };
+        }
+    } else {
+        return {
+            statusCode: 500,
+            error: 'Could not fs.open the file for updating, it may not exist yet.' + err,
+        };
+    }
+};
 
+/**
+ * Delete a file in a folder
+ * @param { string } dir Name of the folder in which the file is localted
+ * @param { string } file Id of the file to be deleted
+ */
+_data.delete = async (dir, file) => {
+    // Unlink the file
+    const deleted = fsAsync.unlink(_data.baseDir+dir+'/'+file+'.json');
+    if (deleted) {
+        return true;
+    } else {
+        return false;
+    }
+};
 
 // List all the items in a directory
-lib.list = (dir, callback) => {
-    fs.readdir(lib.baseDir + dir + '/', (err, data) => {
-        if (!err && data && data.length > 0) {
-            let trimmedFileNames = [];
-            data.forEach((fileName) => {
-                trimmedFileNames.push(fileName.replace('.json', ''));
-            });
-            callback(false, trimmedFileNames);
-        } else {
-            callback(err, data);
+_data.list = async dir => {
+    const data = await fsAsync.readdir(_data.baseDir + dir + '/');
+    if (data && data.length > 0) {
+        let trimmedFileNames = [];
+        data.forEach((fileName) => {
+            trimmedFileNames.push(fileName.replace('.json', ''));
+        });
+        return {
+            payload: trimmedFileNames,
         }
-    })
+    } else {
+        return {
+            statusCode: 404,
+            error: 'No data found.',
+        }
+    }
 };
 
 // Export the module
-module.exports = lib;
+module.exports = _data;
